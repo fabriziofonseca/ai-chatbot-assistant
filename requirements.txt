@@ -1,0 +1,5 @@
+streamlit 
+PyMuPDF 
+langchain 
+faiss-cpu 
+requests
