@@ -3,3 +3,7 @@ PyMuPDF
 langchain 
 faiss-cpu 
 requests
+langchain-community
+openai
+sentence-transformers
+load_dotenv

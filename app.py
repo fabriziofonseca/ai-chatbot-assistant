@@ -1,63 +1,82 @@
 import streamlit as st
 import fitz  # PyMuPDF
-import requests
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from openai import OpenAI
 
-# Load API Key securely (you can also use st.secrets["deepseek_api_key"])
+# Load env vars and DeepSeek
 load_dotenv()
-API_KEY = os.getenv("DEEPSEEK_API_KEY")
+client = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
 
-st.title("📄💬 MedSpa Chatbot Powered by DeepSeek")
+st.set_page_config(page_title="MedSpa Chatbot", page_icon="💬")
+st.title("📄💬 MedSpa PDF Chatbot (Optimized)")
 
-# PDF → Text
+# Extract text from PDF
 def extract_text_from_pdf(file):
     doc = fitz.open(stream=file.read(), filetype="pdf")
     return "\n".join(page.get_text() for page in doc)
 
-# Embed and store
-@st.cache_resource(show_spinner="Indexing the PDF...")
+# Vectorstore caching
+@st.cache_resource(show_spinner="Indexing and embedding PDF...")
 def create_vectorstore(text):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    docs = splitter.create_documents([text])
-    embedder = HuggingFaceEmbeddings(model_name="hkunlp/instructor-base")
-    return FAISS.from_documents(docs, embedder)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=30)
+    chunks = splitter.create_documents([text])
+    embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectorstore = FAISS.from_documents(chunks, embedder)
+    vectorstore.save_local("faiss_index")
+    return vectorstore
 
-# Ask DeepSeek
-def ask_deepseek(query, context):
-    prompt = f"""You are a helpful assistant for a medspa. Answer the user's question using ONLY the context below. If the info is not there, say "I’m not sure based on the uploaded info."
+# Restore from disk if exists
+if os.path.exists("faiss_index/index.faiss") and os.path.exists("faiss_index/index.pkl"):
+    embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    st.session_state.vectorstore = FAISS.load_local("faiss_index", embedder)
+else:
+    st.session_state.vectorstore = None
 
-Context:
-{context}
+# Init memory
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-Question: {query}
-Answer:"""
+# Upload PDF
+pdf_file = st.file_uploader("Upload your MedSpa PDF", type="pdf")
+if pdf_file and st.session_state.vectorstore is None:
+    text = extract_text_from_pdf(pdf_file)
+    st.session_state.vectorstore = create_vectorstore(text)
 
-    res = requests.post(
-        "https://api.deepseek.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {API_KEY}"},
-        json={
-            "model": "deepseek-chat",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        }
-    )
-    return res.json()["choices"][0]["message"]["content"]
+# Input
+prompt = st.chat_input("Ask a question about services, prices, treatments...")
 
-# Upload UI
-uploaded_file = st.file_uploader("Upload MedSpa Service PDF", type="pdf")
-if uploaded_file:
-    raw_text = extract_text_from_pdf(uploaded_file)
-    vectorstore = create_vectorstore(raw_text)
-    st.success("PDF successfully parsed and indexed!")
+# Process query
+if prompt and st.session_state.vectorstore:
+    docs = st.session_state.vectorstore.similarity_search(prompt, k=2)
+    context = "\n\n".join(doc.page_content for doc in docs)
+    messages = [{"role": "system", "content": "You are a helpful assistant that works for a medspa, your job is to provide clients information based ONLY in the files provided. You will look forward to book and appointment with the prospect and also keep the information short but charming and charismatic like a front desk assistant. "}]
+    messages += st.session_state.chat_history
+    messages.append({"role": "user", "content": f"{prompt}\n\nContext:\n{context}"})
 
-    query = st.text_input("Ask about services, prices, or promotions:")
-    if query:
-        docs = vectorstore.similarity_search(query, k=4)
-        context = "\n\n".join([d.page_content for d in docs])
-        with st.spinner("Thinking..."):
-            response = ask_deepseek(query, context)
-        st.markdown(f"🤖 **DeepSeek:** {response}")
+    # Stream reply
+    with st.chat_message("assistant"):
+        response_text = ""
+        response_stream = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=messages,
+            stream=True
+        )
+        response_box = st.empty()
+        for chunk in response_stream:
+            delta = chunk.choices[0].delta
+            content = delta.get("content", "")
+            response_text += content
+            response_box.markdown(response_text)
+
+    # Update memory
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    st.session_state.chat_history.append({"role": "assistant", "content": response_text})
+
+# Display past chat
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
