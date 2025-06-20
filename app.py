@@ -11,8 +11,8 @@ from openai import OpenAI
 load_dotenv()
 client = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
 
-st.set_page_config(page_title="MedSpa Chatbot", page_icon="💬")
-st.title("📄💬 MedSpa PDF Chatbot (Optimized)")
+st.set_page_config(page_title="Radiant Medspa AI", page_icon="💬")
+st.title("Hello! I'm your AI front desk Assistant! How I can help you today?")
 
 # Extract text from PDF
 def extract_text_from_pdf(file):
@@ -32,7 +32,12 @@ def create_vectorstore(text):
 # Restore from disk if exists
 if os.path.exists("faiss_index/index.faiss") and os.path.exists("faiss_index/index.pkl"):
     embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    st.session_state.vectorstore = FAISS.load_local("faiss_index", embedder)
+    st.session_state.vectorstore = FAISS.load_local(
+        "faiss_index",
+        embedder,
+        allow_dangerous_deserialization=True
+)
+
 else:
     st.session_state.vectorstore = None
 
@@ -41,7 +46,7 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 # Upload PDF
-pdf_file = st.file_uploader("Upload your MedSpa PDF", type="pdf")
+pdf_file = st.file_uploader("Upload your files please", type="pdf")
 if pdf_file and st.session_state.vectorstore is None:
     text = extract_text_from_pdf(pdf_file)
     st.session_state.vectorstore = create_vectorstore(text)
@@ -51,32 +56,35 @@ prompt = st.chat_input("Ask a question about services, prices, treatments...")
 
 # Process query
 if prompt and st.session_state.vectorstore:
+    # Save user message to history
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+
+    # Display full past chat (from oldest to newest)
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Prepare messages
     docs = st.session_state.vectorstore.similarity_search(prompt, k=2)
     context = "\n\n".join(doc.page_content for doc in docs)
-    messages = [{"role": "system", "content": "You are a helpful assistant that works for a medspa, your job is to provide clients information based ONLY in the files provided. You will look forward to book and appointment with the prospect and also keep the information short but charming and charismatic like a front desk assistant. "}]
+    messages = [{"role": "system", "content": "You are a helpful assistant that works for a medspa, your job is to provide clients information based ONLY in the files provided. You will look forward to book an appointment with the prospect and also keep the information short but charming and charismatic like a front desk assistant."}]
     messages += st.session_state.chat_history
     messages.append({"role": "user", "content": f"{prompt}\n\nContext:\n{context}"})
 
-    # Stream reply
+    # Stream assistant reply
+    response_text = ""
     with st.chat_message("assistant"):
-        response_text = ""
+        response_box = st.empty()
         response_stream = client.chat.completions.create(
             model="deepseek-chat",
             messages=messages,
             stream=True
         )
-        response_box = st.empty()
         for chunk in response_stream:
             delta = chunk.choices[0].delta
-            content = delta.get("content", "")
+            content = getattr(delta, "content", "")
             response_text += content
             response_box.markdown(response_text)
 
-    # Update memory
-    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    # Save assistant reply to history
     st.session_state.chat_history.append({"role": "assistant", "content": response_text})
-
-# Display past chat
-for msg in st.session_state.chat_history:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
